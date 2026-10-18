@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-import os
-import logging
+import os, base64, logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -39,23 +38,30 @@ class Handler(BaseHTTPRequestHandler):
             text = f.read().strip()
         
         if not text:
-            self.send_error(503, 'Subscription is empty')
+            self.send_error(503, 'Empty')
             return
         
-        body = (text + '\n').encode('utf-8')
+        # Если это happ://add/... — кодируем в base64, чтобы Happ увидел это как подписку
+        if text.startswith('happ://'):
+            text_to_send = base64.b64encode(text.encode()).decode()
+            log.info(f'GET /sub/{safe_name} -> base64 happ link')
+        else:
+            text_to_send = text
+            log.info(f'GET /sub/{safe_name} -> raw')
+        
+        body = (text_to_send + '\n').encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.end_headers()
         self.wfile.write(body)
-        log.info(f'GET /sub/{safe_name} -> served')
 
     def serve_status(self):
         subs = []
         if os.path.exists(SUBS_DIR):
             subs = [f for f in os.listdir(SUBS_DIR) if f.endswith('.txt')]
-        body = f'OK\nTotal subscriptions: {len(subs)}\nNames: {", ".join(subs)}\n'.encode()
+        body = f'OK\nTotal: {len(subs)}\nNames: {", ".join(subs)}\n'.encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -67,10 +73,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     os.makedirs(SUBS_DIR, exist_ok=True)
-    log.info(f'Starting server on port {PORT}')
+    log.info(f'Starting on port {PORT}')
     server = HTTPServer(('0.0.0.0', PORT), Handler)
-    log.info(f'Server ready. Subs dir: {SUBS_DIR}')
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        log.info('Shutdown')
+    server.serve_forever()
