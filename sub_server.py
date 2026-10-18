@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import os, base64, logging
+import os
+import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -31,7 +32,7 @@ class Handler(BaseHTTPRequestHandler):
         file_path = os.path.join(SUBS_DIR, f'{safe_name}.txt')
         
         if not os.path.exists(file_path):
-            self.send_error(404, f'Subscription {safe_name} not found')
+            self.send_error(404, f'Not found: {safe_name}')
             return
         
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -41,21 +42,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(503, 'Empty')
             return
         
-        # Если это happ://add/... — кодируем в base64, чтобы Happ увидел это как подписку
-        if text.startswith('happ://'):
-            text_to_send = base64.b64encode(text.encode()).decode()
-            log.info(f'GET /sub/{safe_name} -> base64 happ link')
-        else:
-            text_to_send = text
-            log.info(f'GET /sub/{safe_name} -> raw')
-        
-        body = (text_to_send + '\n').encode('utf-8')
+        body = (text + '\n').encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.end_headers()
         self.wfile.write(body)
+        log.info(f'GET /sub/{safe_name} -> {len(text)} bytes')
 
     def serve_status(self):
         subs = []
