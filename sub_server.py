@@ -3,67 +3,76 @@ import os
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('subserver')
 
-# Файл, в который бот записывает ссылки
-CONFIG_FILE = 'alive_configs.txt'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBS_DIR = os.path.join(BASE_DIR, 'subscriptions')
 PORT = int(os.environ.get('PORT', 8080))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # Любой из этих путей отдаёт список конфигов в чистом виде
-        if self.path in ('/', '/sub', '/subscription', '/plain'):
-            self.serve_plain()
-        elif self.path == '/status':
+        # Обработка /status
+        if self.path == '/status':
             self.serve_status()
+            return
+
+        # Обработка /sub/имя или /sub
+        name = None
+        if self.path.startswith('/sub/'):
+            name = self.path[5:].strip('/')
+        elif self.path == '/sub':
+            name = 'default'
+
+        if name:
+            self.serve_sub(name)
         else:
             self.send_error(404)
 
-    def _read_configs(self):
-        if not os.path.exists(CONFIG_FILE):
-            return None
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
+    def serve_sub(self, name):
+        # Защита от взлома путей
+        safe_name = os.path.basename(name)
+        file_path = os.path.join(SUBS_DIR, f'{safe_name}.txt')
 
-    def serve_plain(self):
-        configs = self._read_configs()
-        if configs is None:
-            self.send_error(503, 'No configs yet')
+        if not os.path.exists(file_path):
+            self.send_error(404, f'Subscription {safe_name} not found')
             return
-        
-        text = '\n'.join(configs)
-        
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text = f.read().strip()
+
+        if not text:
+            self.send_error(503, 'Subscription is empty')
+            return
+
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.end_headers()
         self.wfile.write(text.encode())
-        log.info(f'GET {self.path} -> {len(configs)} configs')
+        log.info(f'GET /sub/{safe_name} -> served')
 
     def serve_status(self):
-        configs = self._read_configs()
-        count = len(configs) if configs else 0
-        body = f'OK\nconfigs: {count}\nfile_exists: {configs is not None}\n'.encode()
+        # Собираем статистику по всем файлам
+        subs = []
+        if os.path.exists(SUBS_DIR):
+            subs = [f for f in os.listdir(SUBS_DIR) if f.endswith('.txt')]
         
+        body = f'OK\nTotal subscriptions: {len(subs)}\nNames: {", ".join(subs)}\n'.encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        log.info(f'GET /status -> {count} configs')
 
     def log_message(self, fmt, *args):
         log.info(f'{self.address_string()} - {fmt % args}')
 
 if __name__ == '__main__':
+    os.makedirs(SUBS_DIR, exist_ok=True)
     log.info(f'Starting server on port {PORT}')
     server = HTTPServer(('0.0.0.0', PORT), Handler)
-    log.info('Server ready')
+    log.info(f'Server ready. Subs dir: {SUBS_DIR}')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

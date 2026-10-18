@@ -1,0 +1,9 @@
+{
+  "repo_dir": "/data/data/com.termux/files/home/vpn_sun",
+  "render_url": "https://vpn-sun.onrender.com",
+  "target": "https://power-vps.pro",
+  "firefox": "/data/data/com.termux/files/usr/bin/firefox",
+  "geckodriver": "/data/data/com.termux/files/usr/bin/geckodriver",
+  "git_branch": "main",
+  "git_remote": "origin"
+}
