@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-import sys
 import time
 import random
 import string
@@ -9,6 +8,7 @@ import re
 import json
 import logging
 import subprocess
+import base64
 from datetime import datetime
 from pathlib import Path
 
@@ -24,15 +24,14 @@ from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-# Цвета для консоли
 RED, GREEN, YELLOW, CYAN, WHITE = '\033[91m', '\033[92m', '\033[93m', '\033[96m', '\033[97m'
 BOLD, DIM, END = '\033[1m', '\033[2m', '\033[0m'
 
 BASE = Path(__file__).parent
-REPO_DIR = Path('/data/data/com.termux/files/home/vpn_sun')
+SUBS_DIR = BASE / 'subscriptions'
+REPO_DIR = BASE
 
-# Загружаем настройки
-with open(BASE / 'config.json', 'r') as f:
+with open(BASE / 'config.json') as f:
     CFG = json.load(f)
 
 LOG_FILE = BASE / 'vpn.log'
@@ -58,20 +57,25 @@ log.addHandler(fh)
 def banner():
     print(f"""
 {RED}╔══════════════════════════════════════════╗{END}
-{RED}║{END} {BOLD}{WHITE}       VPN BOT • HAPP TRIAL           {END}{RED}║{END}
+{RED}║{END} {BOLD}{WHITE}       VPN BOT • VLESS FETCHER        {END}{RED}║{END}
 {RED}╚══════════════════════════════════════════╝{END}
 """)
 
 
-def ask_count():
-    while True:
-        try:
-            n = int(input(f'{RED}[?]{END} Сколько ссылок создать? {DIM}(1-10){END}: ').strip())
-            if 1 <= n <= 10:
-                return n
-            print(f'{YELLOW}[!]{END} Введи 1-10')
-        except (ValueError, KeyboardInterrupt, EOFError):
-            return 1
+def ask_names():
+    print(f'{RED}[?]{END} Введи имена друзей через запятую {DIM}(например: dima,sasha){END}:')
+    try:
+        inp = input(f'{RED}>{END} ').strip()
+    except (KeyboardInterrupt, EOFError):
+        return ['default']
+    if not inp:
+        return ['default']
+    names = []
+    for n in inp.split(','):
+        safe = re.sub(r'[^a-zA-Z0-9_-]', '', n.strip().lower())
+        if safe:
+            names.append(safe)
+    return names if names else ['default']
 
 
 def try_mailtm():
@@ -132,9 +136,9 @@ def make_driver():
     return drv
 
 
-def register(email, drv):
+def register_and_get_config(email, drv):
     try:
-        log.info('Загрузка сайта power-vps...')
+        log.info('Загрузка power-vps...')
         loaded = False
         for _ in range(4):
             try:
@@ -147,12 +151,9 @@ def register(email, drv):
                 if drv.title and 'Problem' not in drv.title:
                     loaded = True
                     break
-        if not loaded:
-            log.error('Не загрузилось')
-            return None
+        if not loaded: return None
         time.sleep(3)
 
-        # Ищем кнопку E-mail
         clicked = False
         for a in drv.find_elements(By.TAG_NAME, 'a'):
             try:
@@ -163,19 +164,14 @@ def register(email, drv):
                     clicked = True
                     break
             except: pass
-            
         if not clicked:
             btns = [a for a in drv.find_elements(By.TAG_NAME, 'a') if 'получить' in a.text.lower() and a.is_displayed()]
             if len(btns) >= 2:
                 drv.execute_script('arguments[0].click();', btns[1])
                 clicked = True
-                
-        if not clicked:
-            log.error('Кнопка E-mail не найдена')
-            return None
+        if not clicked: return None
         time.sleep(3)
 
-        # Заполняем форму
         filled = 0
         for inp in drv.find_elements(By.TAG_NAME, 'input'):
             if not inp.is_displayed(): continue
@@ -186,12 +182,8 @@ def register(email, drv):
                 elif 'text' in name or 'name' in name:
                     inp.clear(); inp.send_keys('User'); filled += 1
             except: pass
-            
-        if filled == 0:
-            log.error('Поля не заполнены')
-            return None
+        if filled == 0: return None
 
-        # Отправляем
         for btn in drv.find_elements(By.TAG_NAME, 'button'):
             if btn.is_displayed() and 'получить' in btn.text.lower():
                 drv.execute_script('arguments[0].click();', btn)
@@ -201,118 +193,124 @@ def register(email, drv):
         try:
             WebDriverWait(drv, 60).until(lambda d: 'powerhost.pro' in d.current_url)
         except: pass
-        
         time.sleep(3)
         url = drv.current_url
-        log.info(f'URL: {url}')
+        if 's.powerhost.pro/' not in url: return None
         
-        if 's.powerhost.pro/' not in url:
-            return None
-        return url
+        log.info('Ищу токен в cookies...')
+        drv.get(url)
+        time.sleep(3)
+        
+        token = None
+        for c in drv.get_cookies():
+            if 'token' in c['name'].lower() or 'auth' in c['name'].lower() or 'sub' in c['name'].lower():
+                token = c['value']
+                log.info(f'Токен найден: {c["name"]} = {token[:20]}...')
+                break
+        
+        if token:
+            api_url = f'https://s.powerhost.pro/api/subscription/{token}'
+            try:
+                r = requests.get(api_url, timeout=15)
+                if r.status_code == 200:
+                    text = r.text.strip()
+                    try:
+                        decoded = base64.b64decode(text).decode('utf-8')
+                        if 'vless://' in decoded:
+                            return decoded
+                    except:
+                        if 'vless://' in text:
+                            return text
+            except Exception as e:
+                log.warning(f'API error: {e}')
+        
+        # Если токен не сработал, ищем в HTML
+        page_source = drv.page_source
+        vless = re.findall(r'vless://[^\s<>"\'\\]+', page_source)
+        if vless:
+            return '\n'.join(vless)
+        
+        return None
     except Exception as e:
         log.error(f'Register error: {e}')
         return None
 
 
-def get_one_link(idx, total):
+def get_one_config(name):
     print(f"\n{RED}{'━' * 48}{END}")
-    print(f"{BOLD}{WHITE} ССЫЛКА {idx}/{total}{END}")
+    print(f"{BOLD}{WHITE} ГЕНЕРАЦИЯ ДЛЯ: {name.upper()}{END}")
     print(f"{RED}{'━' * 48}{END}\n")
 
     email, account, provider = create_email()
     if not email:
-        log.error('Почта не создана')
+        log.error(f'[{name}] Почта не создана')
         return None
 
     drv = make_driver()
     try:
-        link = register(email, drv)
+        config = register_and_get_config(email, drv)
     finally:
         try: drv.quit()
         except: pass
 
-    if link:
-        print(f"\n{GREEN}✓{END} {BOLD}{link}{END}\n")
+    if config:
+        print(f"\n{GREEN}✓{END} Конфиг получен (длина: {len(config)}){END}\n")
     else:
-        log.error('Не получено')
-    return link
+        log.error(f'[{name}] Конфиг не получен')
+    return config
 
 
-def push_to_github(links):
-    if not REPO_DIR.exists():
-        log.warning(f'Repo {REPO_DIR} не найден, пропускаю push')
-        return False
-    
-    log.info('Обновляю alive_configs.txt в репозитории...')
-    config_path = REPO_DIR / 'alive_configs.txt'
-    
-    # Записываем ссылки (каждую с новой строки)
-    with open(config_path, 'w', encoding='utf-8') as f:
-        for l in links:
-            f.write(l + '\n')
-            
+def push_to_github():
+    log.info('Синхронизация с GitHub...')
     try:
-        subprocess.run(['git', 'add', 'alive_configs.txt'], cwd=REPO_DIR, check=True, capture_output=True)
-        subprocess.run(['git', 'commit', '-m', f'Auto: {len(links)} links {datetime.now():%Y-%m-%d %H:%M}'], cwd=REPO_DIR, check=True, capture_output=True)
+        subprocess.run(['git', 'add', 'subscriptions/'], cwd=REPO_DIR, check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', f'Auto: {datetime.now():%Y-%m-%d %H:%M}'], cwd=REPO_DIR, check=True, capture_output=True)
         subprocess.run(['git', 'push', CFG['git_remote'], CFG['git_branch']], cwd=REPO_DIR, check=True, capture_output=True)
-        log.info(f'✓ Запушено {len(links)} ссылок в GitHub')
+        log.info('✓ Запушено в GitHub')
         return True
     except subprocess.CalledProcessError as e:
         log.error(f'Git push failed: {e.stderr.decode() if e.stderr else e}')
         return False
 
 
-def save_local(links):
+def save_local(name, config):
     ts = datetime.now().strftime('%d.%m.%Y %H:%M')
-    with open(BASE / 'happ_link.txt', 'w', encoding='utf-8') as f:
-        f.write(f'Дата: {ts}\nВсего: {len(links)}\n\n')
-        for i, l in enumerate(links, 1):
-            f.write(f'[{i}] {l}\n')
+    SUBS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(SUBS_DIR / f'{name}.txt', 'w', encoding='utf-8') as f:
+        f.write(config + '\n')
     with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
-        for l in links:
-            f.write(f'[{ts}] {l}\n')
+        f.write(f'[{ts}] {name}: config ({len(config)} bytes)\n')
 
 
 def main():
     banner()
-    try:
-        count = ask_count()
-    except KeyboardInterrupt:
-        print(f'\n{YELLOW}Отменено{END}')
-        return
+    names = ask_names()
+    print(f"\n{RED}▶{END} Создаю конфиги для: {BOLD}{', '.join(names)}{END}\n")
 
-    print(f"\n{RED}▶{END} Создаю {BOLD}{count}{END} ссылк{'у' if count == 1 else 'и' if count < 5 else 'ек'}...\n")
-
-    links = []
-    for i in range(1, count + 1):
-        link = get_one_link(i, count)
-        if link:
-            links.append(link)
+    results = {}
+    for name in names:
+        config = get_one_config(name)
+        if config:
+            results[name] = config
+            save_local(name, config)
 
     print(f"\n{RED}{'═' * 48}{END}")
     print(f"{BOLD}{WHITE} РЕЗУЛЬТАТ{END}")
     print(f"{RED}{'═' * 48}{END}\n")
 
-    if not links:
-        print(f"{RED}✗ Ни одной ссылки не создано{END}\n")
+    if not results:
+        print(f"{RED}✗ Ничего не создано{END}\n")
         return
 
-    for i, l in enumerate(links, 1):
-        print(f"{GREEN}{i}.{END} {WHITE}{l}{END}")
+    for name, config in results.items():
+        print(f"{GREEN}•{END} {BOLD}{name}{END}: {WHITE}{CFG['render_url']}/sub/{name}{END}")
 
-    print(f"\n{GREEN}✓{END} Успешно: {BOLD}{len(links)}/{count}{END}")
-    save_local(links)
-
-    log.info('Синхронизация с GitHub...')
-    pushed = push_to_github(links)
-
-    if pushed:
+    print(f"\n{GREEN}✓{END} Успешно: {BOLD}{len(results)}/{len(names)}{END}")
+    if push_to_github():
         print(f"{CYAN}→{END} Сервер обновится через ~40 сек")
-        print(f"{CYAN}→{END} Твоя подписка: {WHITE}{CFG['render_url']}/sub{END}\n")
     else:
-        print(f"{YELLOW}⚠{END} Не удалось запушить в GitHub (проверь токен)\n")
-        
-    print(f"{RED}{'═' * 48}{END}\n")
+        print(f"{YELLOW}⚠{END} Ошибка пуша в GitHub")
+    print(f"\n{RED}{'═' * 48}{END}\n")
 
 
 if __name__ == '__main__':
